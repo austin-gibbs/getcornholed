@@ -97,20 +97,43 @@
       <p class="estimate-line" id="estimateLine"></p>
     </div>
 
+    <div class="panel">
+      <span class="field-label">Games at a time</span>
+      <div class="choice-row" id="courtsRow">
+        <button type="button" class="choice-card" data-courts="1">
+          <span class="choice-title">1 Game</span>
+          <span class="choice-desc">One game on court at a time. One set of boards, everyone watching the same game.</span>
+        </button>
+        <button type="button" class="choice-card selected" data-courts="2">
+          <span class="choice-title">2 Games</span>
+          <span class="choice-desc">Two courts running side by side. The night moves twice as fast.</span>
+        </button>
+      </div>
+      <p class="mode-note">You can switch this mid-tournament from the tournament screen.</p>
+    </div>
+
     <div id="setupError" class="error-banner" hidden></div>
     <button id="drawButton" class="primary-btn" type="button">Draw Teams</button>
-    <p class="fine-print">The draw uses a secure random shuffle (Fisher–Yates). The order you type names in never matters, and you can re-draw as often as you like before the tournament starts.</p>
+    <p class="fine-print">The draw uses a secure random shuffle. The order you type names in never matters, and you can re-draw as often as you like before the tournament starts.</p>
+
+    <div id="pastChampions" class="past-champions" hidden>
+      <p class="section-label history-label">Past Champions</p>
+      <div id="historyList"></div>
+    </div>
   </section>
 
   <!-- ============ DRAW REVEAL ============ -->
   <section id="view-draw" class="view" hidden>
+    <button id="drawBack" class="ghost-btn back-btn" type="button">← Back to Setup</button>
     <p class="micro-label">The Draw</p>
     <h2 class="screen-title" id="drawTitle">Drawing teams…</h2>
+    <div id="drawNotice"></div>
     <div id="drawCards" class="draw-cards"></div>
     <div id="drawReceipt" class="receipt" hidden></div>
     <button id="drawSkip" class="ghost-btn" type="button">Skip</button>
     <div id="drawActions" class="draw-actions" hidden>
       <button id="randomizeAgain" class="ghost-btn big" type="button">Randomize Again</button>
+      <button id="editPlayers" class="ghost-btn big" type="button">Edit Players</button>
       <button id="previewBracket" class="ghost-btn big" type="button">Preview Bracket</button>
       <button id="toBracket" class="primary-btn" type="button">Start Tournament</button>
       <p class="fine-print">Re-draw as many times as you like. The draw locks the moment the tournament starts or the first score goes in.</p>
@@ -126,7 +149,9 @@
       </div>
       <div class="play-actions">
         <span class="live-indicator" id="liveIndicator"><span class="live-dot"></span>LIVE</span>
+        <button id="playBack" class="ghost-btn" type="button" hidden>← Back to Draw</button>
         <button id="shareButton" class="ghost-btn" type="button">Share Bracket</button>
+        <button id="editTeamsButton" class="ghost-btn" type="button" hidden>Edit Teams</button>
         <button id="undoButton" class="ghost-btn danger" type="button" hidden>Undo Last Result</button>
       </div>
     </div>
@@ -145,6 +170,8 @@
 
     <div id="noticeArea"></div>
     <div id="championBanner"></div>
+    <div id="courtControl" class="court-control" hidden></div>
+    <div id="editPanel" class="panel edit-panel" hidden></div>
 
     <div class="tabs" role="tablist">
       <button id="tabMatches" class="tab selected" type="button">Matches</button>
@@ -179,8 +206,10 @@
     <p class="micro-label accent">Champions</p>
     <h2 class="champion-name" id="championName"></h2>
     <p class="champion-sub" id="championSub"></p>
+    <p class="champion-date" id="championDate"></p>
     <div class="overlay-actions">
       <button id="championShare" class="primary-btn" type="button">Share Result</button>
+      <button id="championHistory" class="ghost-btn" type="button">See All Champions</button>
       <button id="championAgain" class="ghost-btn" type="button">New Tournament, Same Players</button>
       <button id="championClose" class="ghost-btn" type="button">Back to Bracket</button>
     </div>

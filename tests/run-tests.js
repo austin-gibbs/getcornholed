@@ -358,6 +358,238 @@ check('lock: starting the tournament (locked flag) blocks redraw even with no sc
 });
 
 // ---------------------------------------------------------------------------
+console.log('\n7. Games at a time (court queue)');
+// ---------------------------------------------------------------------------
+
+function pub(state) {
+  return engine.publicState(state);
+}
+function onCourtMatches(publicSt) {
+  return publicSt.matches.filter((m) => m.court);
+}
+
+check('courts: the setting is stored at creation; anything but 1 normalizes to 2', () => {
+  const one = engine.createTournament({ name: 'T', format: 'single', mode: 'random', resetEnabled: false, players: players(8), gamesAtATime: 1 });
+  assert.strictEqual(one.gamesAtATime, 1);
+  const unset = engine.createTournament({ name: 'T', format: 'single', mode: 'random', resetEnabled: false, players: players(8) });
+  assert.strictEqual(unset.gamesAtATime, 2);
+  const bogus = engine.createTournament({ name: 'T', format: 'single', mode: 'random', resetEnabled: false, players: players(8), gamesAtATime: 5 });
+  assert.strictEqual(bogus.gamesAtATime, 2);
+});
+
+for (const format of ['single', 'double']) {
+  check('courts: gamesAtATime 1 keeps exactly one match on Court 1 at every step (' + format + ')', () => {
+    const state = engine.createTournament({ name: 'T', format, mode: 'random', resetEnabled: true, players: players(16), gamesAtATime: 1 });
+    let guard = 0;
+    while (!state.championTeamId && guard++ < 500) {
+      const p = pub(state);
+      const oc = onCourtMatches(p);
+      assert.strictEqual(oc.length, 1, 'exactly one match on court');
+      assert.strictEqual(oc[0].court, 1);
+      assert.strictEqual(oc[0].id, p.courts.ready[0], 'the on-court match is the first ready match in natural order');
+      assert.deepStrictEqual(p.courts.onCourt, [{ matchId: oc[0].id, court: 1 }]);
+      scoreFirstReady(state, 'A');
+    }
+    assert(state.championTeamId);
+    assert.strictEqual(onCourtMatches(pub(state)).length, 0, 'nothing on court once a champion is crowned');
+  });
+}
+
+check('courts: gamesAtATime 2 keeps two on court until the field thins (double)', () => {
+  const state = engine.createTournament({ name: 'T', format: 'double', mode: 'random', resetEnabled: true, players: players(16), gamesAtATime: 2 });
+  let guard = 0;
+  let sawThinned = false;
+  while (!state.championTeamId && guard++ < 500) {
+    const p = pub(state);
+    const oc = onCourtMatches(p);
+    assert.strictEqual(oc.length, Math.min(2, p.courts.ready.length), 'on-court count tracks the ready count');
+    if (oc.length === 2) assert.deepStrictEqual(oc.map((m) => m.court), [1, 2]);
+    if (p.courts.ready.length === 1) sawThinned = true;
+    scoreFirstReady(state, 'B');
+  }
+  assert(sawThinned, 'the field must thin to a single ready match near the end');
+  assert.strictEqual(onCourtMatches(pub(state)).length, 0);
+});
+
+check('courts: scoring a game rotates the next ready match onto the freed court', () => {
+  const state = engine.createTournament({ name: 'T', format: 'double', mode: 'random', resetEnabled: true, players: players(16), gamesAtATime: 2 });
+  let p = pub(state);
+  assert.deepStrictEqual(p.courts.ready.slice(0, 4), ['W1-0', 'W1-1', 'W1-2', 'W1-3']);
+  assert.deepStrictEqual(p.courts.onCourt, [
+    { matchId: 'W1-0', court: 1 },
+    { matchId: 'W1-1', court: 2 },
+  ]);
+  assert.strictEqual(p.courts.upNext[0], 'W1-2');
+  const w10 = state.matches.find((m) => m.id === 'W1-0');
+  engine.applyScore(state, 'W1-0', engine.matchTeams(state, w10).A.teamId);
+  p = pub(state);
+  assert.deepStrictEqual(p.courts.onCourt, [
+    { matchId: 'W1-1', court: 1 },
+    { matchId: 'W1-2', court: 2 },
+  ], 'W1-2 rotates onto Court 2 and W1-1 moves up to Court 1');
+});
+
+check('courts: mid-tournament change 1 to 2 pulls the next ready match up; 2 to 1 keeps the earliest on Court 1', () => {
+  const state = engine.createTournament({ name: 'T', format: 'double', mode: 'random', resetEnabled: true, players: players(16), gamesAtATime: 1 });
+  scoreFirstReady(state, 'A');
+  let p = pub(state);
+  assert.strictEqual(onCourtMatches(p).length, 1);
+  const earliest = p.courts.ready[0];
+  const second = p.courts.ready[1];
+  state.gamesAtATime = 2; // what POST /api/redraw {action:'courts'} writes
+  p = pub(state);
+  assert.deepStrictEqual(p.courts.onCourt, [
+    { matchId: earliest, court: 1 },
+    { matchId: second, court: 2 },
+  ]);
+  state.gamesAtATime = 1;
+  p = pub(state);
+  assert.deepStrictEqual(p.courts.onCourt, [{ matchId: earliest, court: 1 }], 'the earliest match keeps Court 1');
+});
+
+check('courts: a pre-feature tournament (no gamesAtATime field) loads with the default of 2', () => {
+  const state = engine.createTournament({ name: 'T', format: 'double', mode: 'random', resetEnabled: true, players: players(16), gamesAtATime: 1 });
+  delete state.gamesAtATime; // exactly what an old stored document looks like
+  const p = pub(state);
+  assert.strictEqual(p.gamesAtATime, 2);
+  assert.strictEqual(onCourtMatches(p).length, 2);
+  assert.strictEqual(engine.courtQueue(state).gamesAtATime, 2);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\n8. Live team editing (swap, substitute, rename)');
+// ---------------------------------------------------------------------------
+
+check('edit: swap two players between teams after the start; sizes stay valid; finished results stand', () => {
+  const state = engine.createTournament({ name: 'T', format: 'double', mode: 'random', resetEnabled: true, players: players(16) });
+  const first = scoreFirstReady(state, 'A'); // tournament started, draw locked
+  const finishedWinner = first.winner;
+  const finishedLoser = first.loser;
+  const tA = state.teams[0];
+  const tB = state.teams[1];
+  const pA = tA.players[0];
+  const pB = tB.players[0];
+  engine.swapPlayers(state, tA.id, pA, tB.id, pB);
+  assert(tA.players.includes(pB) && !tA.players.includes(pA), 'player B moved to team A');
+  assert(tB.players.includes(pA) && !tB.players.includes(pB), 'player A moved to team B');
+  state.teams.forEach((t) => assert.strictEqual(t.players.length, 2, 'every team still has exactly 2 players'));
+  const finished = state.matches.find((m) => m.id === first.id);
+  assert.strictEqual(finished.winner, finishedWinner, 'the recorded winner stands');
+  assert.strictEqual(finished.loser, finishedLoser, 'the recorded loser stands');
+  assert.strictEqual(state.players.length, 16, 'the roster itself is unchanged by a swap');
+  playToChampion(state, 'A'); // the edited bracket still completes
+});
+
+check('edit: invalid swaps are rejected (same team, player not on the named team, unknown team)', () => {
+  const state = engine.createTournament({ name: 'T', format: 'single', mode: 'random', resetEnabled: false, players: players(8) });
+  const tA = state.teams[0];
+  const tB = state.teams[1];
+  assert.throws(() => engine.swapPlayers(state, tA.id, tA.players[0], tA.id, tA.players[1]), /different teams/);
+  assert.throws(() => engine.swapPlayers(state, tA.id, tB.players[0], tB.id, tB.players[1]), /not on that team/);
+  assert.throws(() => engine.swapPlayers(state, 'T99', tA.players[0], tB.id, tB.players[0]), /Team not found/);
+});
+
+check('edit: substitute replaces a player everywhere and records the coed gender choice', () => {
+  const state = engine.createTournament({ name: 'T', format: 'double', mode: 'coed', resetEnabled: true, players: coedRoster(4, 4) });
+  const team = state.teams[0];
+  const out = team.players.find((p) => p.startsWith('Man'));
+  engine.substitutePlayer(state, team.id, out, 'New Guy', 'M');
+  assert(team.players.includes('New Guy'), 'the sub is on the team');
+  assert(!team.players.includes(out), 'the replaced player is off the team');
+  const rec = state.players.find((p) => p.name === 'New Guy');
+  assert(rec && rec.gender === 'M', 'the roster record carries the chosen gender');
+  assert(!state.players.some((p) => p.name === out), 'the old name is gone from the roster');
+  assert.strictEqual(team.players.length, 2);
+  assert.throws(() => engine.substitutePlayer(state, team.id, 'New Guy', team.players[1], 'F'), /already playing/);
+  assert.throws(() => engine.substitutePlayer(state, team.id, 'Ghost Player', 'Someone', 'F'), /not on that team/);
+});
+
+check('edit: rename updates the roster and every team; renaming onto an existing name is rejected', () => {
+  const state = engine.createTournament({ name: 'T', format: 'single', mode: 'random', resetEnabled: false, players: players(8) });
+  const team = state.teams[0];
+  const old = team.players[0];
+  const other = state.teams[1].players[0];
+  engine.renamePlayer(state, old, 'Renamed Person');
+  assert(team.players.includes('Renamed Person'));
+  assert(state.players.some((p) => p.name === 'Renamed Person'));
+  assert(!state.players.some((p) => p.name === old));
+  assert.throws(() => engine.renamePlayer(state, 'Renamed Person', other), /already playing/);
+  assert.throws(() => engine.renamePlayer(state, 'Nobody Here', 'X'), /Player not found/);
+});
+
+check('edit: the champion cannot be edited once the tournament is complete', () => {
+  const state = engine.createTournament({ name: 'T', format: 'single', mode: 'random', resetEnabled: false, players: players(8) });
+  playToChampion(state, 'A');
+  const tA = state.teams[0];
+  const tB = state.teams[1];
+  assert.throws(() => engine.swapPlayers(state, tA.id, tA.players[0], tB.id, tB.players[0]), /finished/);
+  assert.throws(() => engine.substitutePlayer(state, tA.id, tA.players[0], 'Late Sub', null), /finished/);
+  assert.throws(() => engine.renamePlayer(state, tA.players[0], 'Too Late'), /finished/);
+});
+
+check('edit: a Walker team stays a one-player team through swaps', () => {
+  const state = engine.createTournament({ name: 'T', format: 'single', mode: 'random', resetEnabled: false, players: players(9) });
+  const walker = state.teams.find((t) => t.walker);
+  const other = state.teams.find((t) => !t.walker);
+  engine.swapPlayers(state, walker.id, walker.players[0], other.id, other.players[0]);
+  assert.strictEqual(walker.players.length, 1, 'walker team still solo');
+  assert.strictEqual(other.players.length, 2, 'regular team still a pair');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\n9. Tournament history entries');
+// ---------------------------------------------------------------------------
+
+check('history: buildHistoryEntry captures champion, runner-up, and counts (single)', () => {
+  const state = engine.createTournament({ name: 'Finals Night', format: 'single', mode: 'random', resetEnabled: false, players: players(8) });
+  assert.strictEqual(engine.buildHistoryEntry(state), null, 'no entry before a champion exists');
+  playToChampion(state, 'A');
+  const entry = engine.buildHistoryEntry(state);
+  const champ = state.teams.find((t) => t.id === state.championTeamId);
+  const finalMatch = state.matches.find((m) => m.winTo === 'champion');
+  const runnerTeam = state.teams.find((t) => t.id === finalMatch.loser);
+  assert.deepStrictEqual(entry.champion.players, champ.players);
+  assert.deepStrictEqual(entry.runnerUp.players, runnerTeam.players, 'runner-up is the final loser');
+  assert.strictEqual(entry.name, 'Finals Night');
+  assert.strictEqual(entry.format, 'single');
+  assert.strictEqual(entry.mode, 'random');
+  assert.strictEqual(entry.playerCount, 8);
+  assert.strictEqual(entry.teamCount, 4);
+  assert.strictEqual(entry.gamesPlayed, 3);
+});
+
+check('history: double-elimination runner-up is the Grand Final loser when the unbeaten team wins', () => {
+  const state = engine.createTournament({ name: 'T', format: 'double', mode: 'random', resetEnabled: true, players: players(16) });
+  playToChampion(state, 'A');
+  const entry = engine.buildHistoryEntry(state);
+  const gf = state.matches.find((m) => m.id === 'GF');
+  const runnerTeam = state.teams.find((t) => t.id === gf.loser);
+  assert.deepStrictEqual(entry.runnerUp.players, runnerTeam.players);
+  assert.strictEqual(entry.gamesPlayed, 14);
+});
+
+check('history: when the reset game decides it, the runner-up is the reset loser', () => {
+  const state = engine.createTournament({ name: 'T', format: 'double', mode: 'random', resetEnabled: true, players: players(16) });
+  let guard = 0;
+  while (guard++ < 500) {
+    const ready = readyMatches(state).filter((m) => m.id !== 'GF' && m.id !== 'RST');
+    if (!ready.length) break;
+    scoreFirstReady(state, 'A');
+  }
+  const gf = state.matches.find((m) => m.id === 'GF');
+  const gfTeams = engine.matchTeams(state, gf);
+  const wbChamp = gfTeams.A.teamId;
+  const lbChamp = gfTeams.B.teamId;
+  engine.applyScore(state, 'GF', lbChamp);
+  engine.applyScore(state, 'RST', lbChamp);
+  assert.strictEqual(state.championTeamId, lbChamp);
+  const entry = engine.buildHistoryEntry(state);
+  const wbTeam = state.teams.find((t) => t.id === wbChamp);
+  assert.deepStrictEqual(entry.champion.players, state.teams.find((t) => t.id === lbChamp).players);
+  assert.deepStrictEqual(entry.runnerUp.players, wbTeam.players, 'the reset loser is the runner-up');
+});
+
+// ---------------------------------------------------------------------------
 console.log('\n6. API over HTTP (local server, file store)');
 // ---------------------------------------------------------------------------
 
@@ -471,6 +703,179 @@ async function apiTests() {
       const data = await r.json();
       assert.strictEqual(data.tournament.scoresCount, 0);
       assert.strictEqual(data.tournament.matches.find((m) => m.id === match.id).status, 'ready');
+    });
+
+    await checkAsync('api: gamesAtATime is set at create and the courts action is organizer-only and validated', async () => {
+      const res = await post('/api/create', { name: 'Courts API', format: 'double', mode: 'random', reset: true, players: players(16), gamesAtATime: 1 });
+      assert.strictEqual(res.status, 201);
+      const { id, organizerKey, tournament } = await res.json();
+      assert.strictEqual(tournament.gamesAtATime, 1);
+      assert.strictEqual(tournament.matches.filter((m) => m.court).length, 1, 'one match on court in the create response');
+      let g = await (await fetch(base + '/api/tournament?id=' + id)).json();
+      assert.strictEqual(g.tournament.matches.filter((m) => m.court).length, 1, 'spectator read agrees: one on court');
+      let r = await post('/api/redraw', { id, action: 'courts', gamesAtATime: 2 });
+      assert.strictEqual(r.status, 403, 'courts change without the key must be 403');
+      r = await post('/api/redraw', { id, action: 'courts', gamesAtATime: 3 }, organizerKey);
+      assert.strictEqual(r.status, 400, 'gamesAtATime of 3 must be rejected');
+      r = await post('/api/redraw', { id, action: 'courts', gamesAtATime: 2 }, organizerKey);
+      assert.strictEqual(r.status, 200);
+      const data = await r.json();
+      assert.strictEqual(data.tournament.gamesAtATime, 2);
+      assert.strictEqual(data.tournament.matches.filter((m) => m.court).length, 2, 'two on court after the change');
+      g = await (await fetch(base + '/api/tournament?id=' + id)).json();
+      assert.strictEqual(g.tournament.gamesAtATime, 2, 'spectator read shows the new setting');
+    });
+
+    await checkAsync('api: team edits are organizer-only and persist to spectator reads', async () => {
+      const res = await post('/api/create', { name: 'Edit API', format: 'single', mode: 'random', players: players(8) });
+      const { id, organizerKey, tournament } = await res.json();
+      // Start the tournament with one scored game.
+      const m0 = tournament.matches.find((m) => m.status === 'ready');
+      let r = await post('/api/score', { id, matchId: m0.id, winnerTeamId: engine.matchTeams(tournament, m0).A.teamId }, organizerKey);
+      assert.strictEqual(r.status, 200);
+      const g0 = (await (await fetch(base + '/api/tournament?id=' + id)).json()).tournament;
+      const tA = g0.teams[0];
+      const tB = g0.teams[1];
+      const swapBody = { id, action: 'swap', teamAId: tA.id, playerA: tA.players[0], teamBId: tB.id, playerB: tB.players[0] };
+      r = await post('/api/edit', swapBody);
+      assert.strictEqual(r.status, 403, 'swap without the key must be 403');
+      r = await post('/api/edit', swapBody, 'wrong-key-value');
+      assert.strictEqual(r.status, 403, 'swap with a wrong key must be 403');
+      r = await post('/api/edit', { id, action: 'swap', teamAId: tA.id, playerA: tA.players[0], teamBId: tA.id, playerB: tA.players[1] }, organizerKey);
+      assert.strictEqual(r.status, 400, 'swap inside one team must be rejected');
+      r = await post('/api/edit', swapBody, organizerKey);
+      assert.strictEqual(r.status, 200, 'organizer swap succeeds');
+      let g = (await (await fetch(base + '/api/tournament?id=' + id)).json()).tournament;
+      assert(g.teams.find((t) => t.id === tA.id).players.includes(tB.players[0]), 'spectator read shows the swap on team A');
+      assert(g.teams.find((t) => t.id === tB.id).players.includes(tA.players[0]), 'spectator read shows the swap on team B');
+      assert(g.matches.some((m) => m.court), 'the court queue still derives after an edit');
+      // Substitute.
+      const subTarget = g.teams[0];
+      r = await post('/api/edit', { id, action: 'substitute', teamId: subTarget.id, outPlayer: subTarget.players[0], inName: 'Fresh Sub' }, organizerKey);
+      assert.strictEqual(r.status, 200);
+      g = (await (await fetch(base + '/api/tournament?id=' + id)).json()).tournament;
+      assert(g.teams.find((t) => t.id === subTarget.id).players.includes('Fresh Sub'), 'substitute persists');
+      assert(!g.teams.some((t) => t.players.includes(subTarget.players[0])), 'the replaced player is out');
+      // Rename.
+      r = await post('/api/edit', { id, action: 'rename', from: 'Fresh Sub', to: 'Renamed Sub' }, organizerKey);
+      assert.strictEqual(r.status, 200);
+      g = (await (await fetch(base + '/api/tournament?id=' + id)).json()).tournament;
+      assert(g.teams.some((t) => t.players.includes('Renamed Sub')), 'rename persists');
+      assert(g.players.some((p) => p.name === 'Renamed Sub'), 'rename persists on the roster');
+    });
+
+    await checkAsync('api: editing the roster before the start creates a fresh draw at Draw #1 with the new roster', async () => {
+      const res1 = await post('/api/create', { name: 'Roster V1', format: 'single', mode: 'random', players: players(8) });
+      const first = await res1.json();
+      const edited = players(10);
+      edited[0] = { name: 'Zoe New', gender: null };
+      const res2 = await post('/api/create', { name: 'Roster V2', format: 'single', mode: 'random', players: edited });
+      const second = await res2.json();
+      assert.notStrictEqual(second.id, first.id);
+      assert.strictEqual(second.tournament.drawCount, 1, 'a roster change resets the draw count to 1');
+      const names = second.tournament.teams.flatMap((t) => t.players).sort();
+      assert.deepStrictEqual(names, edited.map((p) => p.name).sort(), 'the new teams partition the edited roster exactly');
+    });
+
+    const playHttpToChampion = async (id, key) => {
+      for (let i = 0; i < 300; i++) {
+        const g = await (await fetch(base + '/api/tournament?id=' + id)).json();
+        const t = g.tournament;
+        if (t.championTeamId) return t;
+        const m = t.matches.find((x) => x.status === 'ready');
+        assert(m, 'no ready match and no champion');
+        const r = await post('/api/score', { id, matchId: m.id, winnerTeamId: engine.matchTeams(t, m).A.teamId }, key);
+        assert.strictEqual(r.status, 200);
+      }
+      throw new Error('tournament did not finish');
+    };
+    const historyEntries = async () => {
+      const r = await fetch(base + '/api/history');
+      assert.strictEqual(r.status, 200);
+      return r;
+    };
+
+    await checkAsync('api: history records a completion exactly once, updates on undo and re-decide, newest first, no key material', async () => {
+      const res = await post('/api/create', { name: 'History One', format: 'single', mode: 'random', players: players(8, 'Hist') });
+      const { id, organizerKey } = await res.json();
+      let entries = (await (await historyEntries()).json()).history;
+      assert(!entries.some((e) => e.id === id), 'an unfinished tournament records nothing');
+      // One game in: still nothing.
+      const g0 = (await (await fetch(base + '/api/tournament?id=' + id)).json()).tournament;
+      const m0 = g0.matches.find((m) => m.status === 'ready');
+      let r = await post('/api/score', { id, matchId: m0.id, winnerTeamId: engine.matchTeams(g0, m0).A.teamId }, organizerKey);
+      assert.strictEqual(r.status, 200);
+      entries = (await (await historyEntries()).json()).history;
+      assert(!entries.some((e) => e.id === id), 'a started but unfinished tournament records nothing');
+      const finalState = await playHttpToChampion(id, organizerKey);
+      const champTeam = finalState.teams.find((t) => t.id === finalState.championTeamId);
+      const rawHist = await (await historyEntries()).text();
+      assert(!rawHist.includes('organizerKey'), 'history payload must not mention organizerKey');
+      assert(!rawHist.includes(organizerKey), 'history payload must not contain the key value');
+      entries = JSON.parse(rawHist).history;
+      const mine = entries.filter((e) => e.id === id);
+      assert.strictEqual(mine.length, 1, 'exactly one history entry for the completed tournament');
+      assert.deepStrictEqual(mine[0].champion.players, champTeam.players);
+      assert.strictEqual(mine[0].name, 'History One');
+      assert(mine[0].completedAt, 'entry carries a completion timestamp');
+      // Re-reads never duplicate.
+      entries = (await (await historyEntries()).json()).history;
+      assert.strictEqual(entries.filter((e) => e.id === id).length, 1);
+      // Undo the deciding game: the entry goes away.
+      r = await post('/api/score', { id, action: 'undo' }, organizerKey);
+      assert.strictEqual(r.status, 200);
+      entries = (await (await historyEntries()).json()).history;
+      assert(!entries.some((e) => e.id === id), 'undoing the result removes the history entry');
+      // Re-decide with the other finalist: the entry returns, updated, still single.
+      const g1 = (await (await fetch(base + '/api/tournament?id=' + id)).json()).tournament;
+      const finalMatch = g1.matches.find((m) => m.status === 'ready');
+      const otherWinner = engine.matchTeams(g1, finalMatch).B.teamId;
+      r = await post('/api/score', { id, matchId: finalMatch.id, winnerTeamId: otherWinner }, organizerKey);
+      assert.strictEqual(r.status, 200);
+      entries = (await (await historyEntries()).json()).history;
+      const mine2 = entries.filter((e) => e.id === id);
+      assert.strictEqual(mine2.length, 1, 're-deciding updates the entry instead of duplicating it');
+      const newChampTeam = g1.teams.find((t) => t.id === otherWinner);
+      assert.deepStrictEqual(mine2[0].champion.players, newChampTeam.players, 'the entry shows the final champion');
+      // A second completion sorts ahead of the first.
+      const res2 = await post('/api/create', { name: 'History Two', format: 'single', mode: 'random', players: players(8, 'Hist2') });
+      const second = await res2.json();
+      await playHttpToChampion(second.id, second.organizerKey);
+      entries = (await (await historyEntries()).json()).history;
+      const idxSecond = entries.findIndex((e) => e.id === second.id);
+      const idxFirst = entries.findIndex((e) => e.id === id);
+      assert(idxSecond >= 0 && idxFirst >= 0 && idxSecond < idxFirst, 'newest completion first');
+    });
+
+    await checkAsync('history: the stored list caps at 100 entries, newest first', async () => {
+      const capDir = '/tmp/get-cornholed-history-cap';
+      fs.rmSync(capDir, { recursive: true, force: true });
+      process.env.CORNHOLE_DATA_DIR = capDir;
+      const store = require('../lib/store');
+      const hist = require('../lib/history');
+      const fake = (i) => ({
+        id: 'fake' + i,
+        name: 'Fake ' + i,
+        format: 'single',
+        mode: 'random',
+        players: players(8),
+        teams: [
+          { id: 'T1', players: ['A One', 'A Two'], walker: false },
+          { id: 'T2', players: ['B One', 'B Two'], walker: false },
+        ],
+        matches: [{ id: 'W2-0', winTo: 'champion', status: 'complete', winner: 'T1', loser: 'T2' }],
+        scoresCount: 3,
+        championTeamId: 'T1',
+      });
+      for (let i = 0; i < 105; i++) await hist.syncTournamentHistory(fake(i));
+      const entries = await store.getHistory();
+      assert.strictEqual(entries.length, 100, 'history is capped at 100');
+      assert.strictEqual(entries[0].id, 'fake104', 'newest first');
+      assert.strictEqual(entries[99].id, 'fake5', 'the five oldest were trimmed');
+      const read = await hist.readHistory(100);
+      assert.strictEqual(read.length, 100);
+      assert.deepStrictEqual(read[0].champion.players, ['A One', 'A Two']);
+      assert.deepStrictEqual(read[0].runnerUp.players, ['B One', 'B Two']);
     });
   } finally {
     child.kill();
