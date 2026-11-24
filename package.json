@@ -1,0 +1,1 @@
+{"description":"Get Cornholed: dead-simple cornhole tournament app. Random blind draw, single or double elimination, live shareable bracket.","name":"get-cornholed","private":true,"scripts":{"start":"node server.js","test":"node tests/run-tests.js"},"version":"1.0.0"}

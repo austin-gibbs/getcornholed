@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Get Cornholed — Random-Draw Cornhole Tournaments & Live Brackets</title>
+<meta name="description" content="Get Cornholed runs your cornhole tournament in minutes: add the players, draw random teams, and play a live March Madness style bracket that anyone can follow from one shareable link.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Get Cornholed">
+<meta property="og:title" content="Get Cornholed — Random-Draw Cornhole Tournaments & Live Brackets">
+<meta property="og:description" content="Get Cornholed runs your cornhole tournament in minutes: add the players, draw random teams, and play a live March Madness style bracket that anyone can follow from one shareable link.">
+<meta property="og:url" content="https://get-cornholed.vercel.app/">
+<meta property="og:image" content="https://get-cornholed.vercel.app/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Get Cornholed crest with the words Get Cornholed and the tagline: random-draw cornhole tournaments, live brackets anyone can follow.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Get Cornholed — Random-Draw Cornhole Tournaments & Live Brackets">
+<meta name="twitter:description" content="Add the players, draw random teams, and play a live March Madness style bracket anyone can follow from one shareable link.">
+<meta name="twitter:image" content="https://get-cornholed.vercel.app/og.jpg">
+<meta name="theme-color" content="#0E1113">
+<link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <img class="brand-mark-img" src="/logo.png" alt="Get Cornholed crest">
+    <div class="brand-text">
+      <span class="brand-name">GET CORNHOLED</span>
+      <span class="brand-sub">Blind Draw Tournament</span>
+    </div>
+  </div>
+  <div class="topbar-right" id="topbarRight"></div>
+</header>
+
+<main id="app">
+
+  <!-- ============ SETUP ============ -->
+  <section id="view-setup" class="view">
+    <h1 class="hero">Paste the names.<br>Draw the teams.<br>Play the bracket.</h1>
+    <p class="hero-sub">A full cornhole tournament, run from your phone. No accounts, no sign-ups. First to 21, cancellation scoring.</p>
+
+    <div class="panel">
+      <label class="field-label" for="tournamentName">Tournament name</label>
+      <input id="tournamentName" class="text-input" type="text" maxlength="60" autocomplete="off">
+    </div>
+
+    <div class="panel">
+      <span class="field-label">How should teams be drawn?</span>
+      <div class="choice-row" id="modeRow">
+        <button type="button" class="choice-card selected" data-mode="random">
+          <span class="choice-title">Full Random</span>
+          <span class="choice-desc">Everyone in one hat. Partners drawn completely at random.</span>
+        </button>
+        <button type="button" class="choice-card" data-mode="coed">
+          <span class="choice-title">Male + Female</span>
+          <span class="choice-desc">Every team pairs one male with one female.</span>
+        </button>
+      </div>
+      <p class="mode-note" id="coedNote" hidden>Tag each player Male or Female below. If the counts come out uneven, one player draws a first-round bye and picks up the female player from the first team that loses.</p>
+    </div>
+
+    <div class="panel">
+      <label class="field-label" for="namesInput">Players — one per line (or paste a whole list)</label>
+      <textarea id="namesInput" class="names-input" rows="7" placeholder="Jamie Taylor&#10;Alex Rivera&#10;Sam Chen&#10;Jordan Lee"></textarea>
+      <div class="counter-line">
+        <span id="playerCounter" class="counter">0 players</span>
+        <span id="dupeNote" class="dupe-note"></span>
+      </div>
+      <div id="playerList" class="player-list"></div>
+    </div>
+
+    <div class="panel">
+      <span class="field-label">Tournament format</span>
+      <div class="choice-row" id="formatRow">
+        <button type="button" class="choice-card selected" data-format="double">
+          <span class="choice-title">Double Elimination</span>
+          <span class="choice-desc">Everyone gets at least 2 games. Lose twice and you're out.</span>
+        </button>
+        <button type="button" class="choice-card" data-format="single">
+          <span class="choice-title">Single Elimination</span>
+          <span class="choice-desc">Faster night. Lose once and you're out.</span>
+        </button>
+      </div>
+      <label class="toggle-row" id="resetRow">
+        <input type="checkbox" id="resetToggle" checked>
+        <span class="toggle-text">Championship reset: if the unbeaten team loses the Grand Final, one more game decides it. <em>(Fairest — the final loser must be beaten twice.)</em></span>
+      </label>
+      <p class="estimate-line" id="estimateLine"></p>
+    </div>
+
+    <div id="setupError" class="error-banner" hidden></div>
+    <button id="drawButton" class="primary-btn" type="button">Draw Teams</button>
+    <p class="fine-print">The draw uses a secure random shuffle (Fisher–Yates). The order you type names in never matters, and you can re-draw as often as you like before the tournament starts.</p>
+  </section>
+
+  <!-- ============ DRAW REVEAL ============ -->
+  <section id="view-draw" class="view" hidden>
+    <p class="micro-label">The Draw</p>
+    <h2 class="screen-title" id="drawTitle">Drawing teams…</h2>
+    <div id="drawCards" class="draw-cards"></div>
+    <div id="drawReceipt" class="receipt" hidden></div>
+    <button id="drawSkip" class="ghost-btn" type="button">Skip</button>
+    <div id="drawActions" class="draw-actions" hidden>
+      <button id="randomizeAgain" class="ghost-btn big" type="button">Randomize Again</button>
+      <button id="previewBracket" class="ghost-btn big" type="button">Preview Bracket</button>
+      <button id="toBracket" class="primary-btn" type="button">Start Tournament</button>
+      <p class="fine-print">Re-draw as many times as you like. The draw locks the moment the tournament starts or the first score goes in.</p>
+    </div>
+  </section>
+
+  <!-- ============ PLAY ============ -->
+  <section id="view-play" class="view view-wide" hidden>
+    <div class="play-head">
+      <div>
+        <p class="micro-label" id="playMeta"></p>
+        <h2 class="screen-title" id="playTitle"></h2>
+      </div>
+      <div class="play-actions">
+        <span class="live-indicator" id="liveIndicator"><span class="live-dot"></span>LIVE</span>
+        <button id="shareButton" class="ghost-btn" type="button">Share Bracket</button>
+        <button id="undoButton" class="ghost-btn danger" type="button" hidden>Undo Last Result</button>
+      </div>
+    </div>
+
+    <div id="sharePanel" class="panel share-panel" hidden>
+      <span class="field-label">Spectator link — anyone can watch, only you can score</span>
+      <div class="share-row">
+        <input id="shareLink" class="text-input share-input" type="text" readonly>
+        <button id="copyShare" class="primary-btn small" type="button">Copy Link</button>
+      </div>
+      <div class="qr-wrap">
+        <div id="qrBox" class="qr-box"></div>
+        <p class="qr-note">Point a phone camera at the code to follow the bracket live.</p>
+      </div>
+    </div>
+
+    <div id="noticeArea"></div>
+    <div id="championBanner"></div>
+
+    <div class="tabs" role="tablist">
+      <button id="tabMatches" class="tab selected" type="button">Matches</button>
+      <button id="tabBracket" class="tab" type="button">Bracket</button>
+    </div>
+
+    <div id="matchesView"></div>
+
+    <div id="bracketView" hidden>
+      <div class="tree-scroll" id="treeScroll">
+        <div class="tree-canvas" id="treeCanvas">
+          <svg id="connectorSvg" aria-hidden="true"></svg>
+          <div id="winnersTree"></div>
+          <div id="losersTree"></div>
+        </div>
+      </div>
+      <p class="fine-print" id="treeHint">Scroll sideways to follow the bracket to the Final.</p>
+    </div>
+
+    <div class="play-foot">
+      <button id="newTournament" class="ghost-btn" type="button">Start a New Tournament</button>
+    </div>
+  </section>
+
+</main>
+
+<!-- Champion celebration -->
+<div id="championOverlay" class="overlay" hidden>
+  <canvas id="confettiCanvas"></canvas>
+  <div class="overlay-card">
+    <img class="champion-crest" src="/logo.png" alt="Get Cornholed crest">
+    <p class="micro-label accent">Champions</p>
+    <h2 class="champion-name" id="championName"></h2>
+    <p class="champion-sub" id="championSub"></p>
+    <div class="overlay-actions">
+      <button id="championShare" class="primary-btn" type="button">Share Result</button>
+      <button id="championAgain" class="ghost-btn" type="button">New Tournament, Same Players</button>
+      <button id="championClose" class="ghost-btn" type="button">Back to Bracket</button>
+    </div>
+  </div>
+</div>
+
+<!-- Undo toast -->
+<div id="undoToast" class="undo-toast" hidden>
+  <span id="undoToastText"></span>
+  <button id="undoToastButton" type="button">Undo</button>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
