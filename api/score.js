@@ -2,6 +2,18 @@
 const engine = require('../lib/engine');
 const store = require('../lib/store');
 const api = require('../lib/api-common');
+const history = require('../lib/history');
+
+// History follows the champion: decided -> recorded once, undone ->
+// removed, re-decided -> updated. A history failure must never break
+// scoring, so it is isolated here.
+async function syncHistory(doc) {
+  try {
+    await history.syncTournamentHistory(doc);
+  } catch (e) {
+    console.error('history sync failed:', e.message);
+  }
+}
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return api.sendJson(res, 405, { error: 'Method not allowed' });
@@ -32,6 +44,7 @@ module.exports = async (req, res) => {
       const restored = Object.assign({}, doc, previous, { snapshots });
       restored.updatedAt = new Date().toISOString();
       await store.putTournament(id, restored);
+      await syncHistory(restored);
       const pub = engine.publicState(restored);
       delete pub.organizerKeyHash;
       return api.sendJson(res, 200, { tournament: pub });
@@ -51,12 +64,15 @@ module.exports = async (req, res) => {
         transfer: doc.transfer,
         scoresCount: doc.scoresCount,
         version: doc.version,
+        players: doc.players,
+        gamesAtATime: doc.gamesAtATime,
       })
     );
     engine.applyScore(doc, matchId, winnerTeamId);
     doc.snapshots = (doc.snapshots || []).concat([snapshot]).slice(-60);
     doc.updatedAt = new Date().toISOString();
     await store.putTournament(id, doc);
+    await syncHistory(doc);
     const pub = engine.publicState(doc);
     delete pub.organizerKeyHash;
     return api.sendJson(res, 200, { tournament: pub });

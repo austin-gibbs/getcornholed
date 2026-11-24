@@ -3,6 +3,9 @@
  * POST /api/redraw — organizer only.
  *   { id }                 -> re-run the full draw (rejected once locked)
  *   { id, action: 'start' } -> start the tournament, locking the draw
+ *   { id, action: 'courts', gamesAtATime: 1|2 }
+ *                            -> set how many games run at once (any time;
+ *                               the court queue re-derives on the next read)
  */
 const engine = require('../lib/engine');
 const store = require('../lib/store');
@@ -29,7 +32,14 @@ module.exports = async (req, res) => {
     return api.sendJson(res, 403, { error: 'Only the tournament organizer can change the draw.' });
   }
   try {
-    if (body.action === 'start') {
+    if (body.action === 'courts') {
+      const value = Number(body.gamesAtATime);
+      if (value !== 1 && value !== 2) {
+        return api.sendJson(res, 400, { error: 'Games at a time must be 1 or 2.' });
+      }
+      doc.gamesAtATime = value;
+      doc.version = (doc.version || 1) + 1;
+    } else if (body.action === 'start') {
       doc.locked = true;
       doc.version = (doc.version || 1) + 1;
     } else {

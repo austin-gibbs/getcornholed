@@ -12,6 +12,8 @@ const handlers = {
   '/api/tournament': require('./api/tournament'),
   '/api/score': require('./api/score'),
   '/api/redraw': require('./api/redraw'),
+  '/api/edit': require('./api/edit'),
+  '/api/history': require('./api/history'),
 };
 const mime = {
   '.html': 'text/html; charset=utf-8',

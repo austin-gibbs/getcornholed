@@ -14,13 +14,14 @@ module.exports = async (req, res) => {
   const format = body.format === 'single' ? 'single' : 'double';
   const mode = body.mode === 'coed' ? 'coed' : 'random';
   const resetEnabled = format === 'double' ? body.reset !== false : false;
+  const gamesAtATime = engine.normalizeGamesAtATime(body.gamesAtATime);
   const name = String(body.name || '').trim().replace(/\s+/g, ' ').slice(0, 60) || 'Cornhole Tournament';
 
   const { players, error } = api.normalizePlayers(body.players, mode);
   if (error) return api.sendJson(res, 400, { error });
 
   try {
-    const state = engine.createTournament({ name, format, mode, resetEnabled, players });
+    const state = engine.createTournament({ name, format, mode, resetEnabled, players, gamesAtATime });
     if (state.teams.length < 2) {
       return api.sendJson(res, 400, { error: 'Those players do not make at least 2 teams. Add more players.' });
     }
