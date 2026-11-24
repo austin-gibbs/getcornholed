@@ -7,6 +7,7 @@ const $ = (sel) => document.querySelector(sel);
 const app = {
   mode: 'random',
   format: 'double',
+  courts: 2, // games at a time (setup choice; the server state rules after)
   players: [], // [{name, gender}]
   tournamentId: null,
   organizerKey: null,
@@ -16,6 +17,11 @@ const app = {
   pollTimer: null,
   championShownFor: null,
   drawTimers: [],
+  lastRosterSig: null,
+  rosterChangedNotice: false,
+  editOpen: false,
+  editSel: null, // { teamId, player } chosen for a swap
+  editForm: null, // { kind: 'sub'|'rename', teamId, player, gender }
 };
 
 // ---------------------------------------------------------------------------
@@ -149,7 +155,8 @@ function renderCounter() {
   let est = '';
   if (t >= 2) {
     const matches = app.format === 'double' ? 2 * t - 2 : t - 1;
-    est = 'About ' + matches + ' games' + (app.format === 'double' && $('#resetToggle').checked ? ' (plus a reset game if needed)' : '') + ' · roughly ' + Math.max(15, Math.round((matches * 20) / 60) * 15) + '+ minutes on one set of boards.';
+    const minutes = Math.max(15, Math.round((matches * 20) / app.courts / 60) * 15);
+    est = 'About ' + matches + ' games' + (app.format === 'double' && $('#resetToggle').checked ? ' (plus a reset game if needed)' : '') + ' · roughly ' + minutes + '+ minutes on ' + (app.courts === 1 ? 'one set of boards' : 'two sets of boards') + '.';
   }
   $('#estimateLine').textContent = est;
 }
@@ -199,8 +206,23 @@ function showSetupError(msg) {
   if (msg) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+// Everything the setup screen currently says, as one signature. If a
+// tournament already exists and the signature moved, the roster (or a
+// setting) changed, so the fresh draw must say so plainly.
+function rosterSignature() {
+  return JSON.stringify({
+    p: app.players,
+    m: app.mode,
+    f: app.format,
+    r: $('#resetToggle').checked,
+    c: app.courts,
+  });
+}
+
 async function startDraw() {
   showSetupError('');
+  const sig = rosterSignature();
+  const rosterChanged = !!(app.tournamentId && app.lastRosterSig && sig !== app.lastRosterSig);
   if (app.players.length < 4) {
     showSetupError('You need at least 4 players to run a tournament. Add a few more names.');
     return;
@@ -230,6 +252,7 @@ async function startDraw() {
         format: app.format,
         mode: app.mode,
         reset: $('#resetToggle').checked,
+        gamesAtATime: app.courts,
         players: app.players,
       }),
     });
@@ -239,6 +262,11 @@ async function startDraw() {
     app.organizerKey = data.organizerKey;
     app.state = data.tournament;
     app.isOrganizer = true;
+    app.lastRosterSig = sig;
+    app.rosterChangedNotice = rosterChanged;
+    app.editOpen = false;
+    app.editSel = null;
+    app.editForm = null;
     try {
       localStorage.setItem('gc-key-' + data.id, data.organizerKey);
     } catch (e) {}
@@ -265,6 +293,7 @@ function runDrawReveal(fast) {
   const teams = state.teams.slice().sort((a, b) => a.seed - b.seed);
   const cards = $('#drawCards');
   cards.innerHTML = '';
+  $('#drawNotice').innerHTML = '';
   $('#drawReceipt').hidden = true;
   $('#drawActions').hidden = true;
   $('#drawSkip').hidden = false;
@@ -288,11 +317,22 @@ function runDrawReveal(fast) {
     $('#drawTitle').textContent = 'The teams are set';
     $('#drawSkip').hidden = true;
     $('#drawActions').hidden = false;
+    // Once the draw is locked, the draw screen is a read-only review:
+    // no re-draw, no roster edits, no second start.
+    $('#randomizeAgain').hidden = !!state.locked;
+    $('#editPlayers').hidden = !!state.locked;
+    $('#toBracket').hidden = !!state.locked;
+    if (app.rosterChangedNotice) {
+      $('#drawNotice').innerHTML =
+        '<div class="notice-card"><strong>Roster changed</strong> — these teams were drawn fresh from the updated player list.</div>';
+    }
     const when = new Date(state.drawnAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const receipt = $('#drawReceipt');
     receipt.textContent =
-      'Drawn ' + when + ' · ' + state.players.length + ' players · Secure random draw (Fisher–Yates) · Draw #' + (state.drawCount || 1) +
-      (state.locked ? ' · locked in' : ' · not locked yet — re-draw freely until you start');
+      'Drawn ' + when + ' · ' + state.players.length + ' players · Secure random shuffle · Draw #' + (state.drawCount || 1) +
+      (state.locked ? ' · locked in' : ' · not locked yet — re-draw freely until you start') +
+      (app.rosterChangedNotice ? ' · The roster changed, so these teams were redrawn from scratch.' : '');
+    app.rosterChangedNotice = false;
     receipt.hidden = false;
   };
   const step = () => {
@@ -323,6 +363,31 @@ function drawCardHtml(item, i) {
     '<span><span class="draw-names">' + esc(t.players.join(' & ')) + '</span><br>' +
     '<span class="draw-tag">' + esc(tag) + '</span></span></div>'
   );
+}
+
+// ---------------------------------------------------------------------------
+// Back navigation
+// ---------------------------------------------------------------------------
+// The setup screen is never torn down (views are only hidden), so going
+// back preserves everything exactly as left: tournament name, player
+// names, M/F tags, draw mode, format, reset choice, and games at a time.
+
+function backToSetup() {
+  app.drawTimers.forEach(clearTimeout);
+  app.drawTimers = [];
+  stopPolling();
+  $('#championOverlay').hidden = true;
+  $('#view-draw').hidden = true;
+  $('#view-play').hidden = true;
+  $('#view-setup').hidden = false;
+  syncPlayersFromSetup(); // re-render the roster list from the preserved names
+  loadHistory();
+  window.scrollTo(0, 0);
+}
+
+function backToDraw() {
+  stopPolling();
+  runDrawReveal(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -379,12 +444,18 @@ function renderPlay() {
   const mode = state.mode === 'coed' ? 'Male + Female Draw' : 'Blind Draw';
   const done = state.matches.filter((m) => m.status === 'complete').length;
   const total = state.matches.filter((m) => m.status !== 'dormant' && m.status !== 'not-needed').length;
-  $('#playMeta').textContent = fmt + ' · ' + mode + ' · ' + done + ' of ' + total + ' games done';
+  const courtsText = (state.gamesAtATime === 1 ? '1 game' : '2 games') + ' at a time';
+  $('#playMeta').textContent = fmt + ' · ' + mode + ' · ' + courtsText + ' · ' + done + ' of ' + total + ' games done';
   $('#topbarRight').innerHTML = app.isOrganizer
     ? '<span class="organizer-badge">Organizer</span>'
     : '<span>Spectator</span>';
   $('#undoButton').hidden = !(app.isOrganizer && state.scoresCount > 0 && !state.championTeamId);
+  $('#playBack').hidden = !(app.isOrganizer && !state.championTeamId);
+  $('#editTeamsButton').hidden = !(app.isOrganizer && !state.championTeamId);
+  $('#editTeamsButton').textContent = app.editOpen ? 'Close Editor' : 'Edit Teams';
   $('#shareLink').value = spectatorLink();
+  renderCourtControl();
+  renderEditPanel();
   renderNotices();
   renderChampionBanner();
   if (app.tab === 'matches') {
@@ -438,6 +509,208 @@ function renderNotices() {
   if (nr) nr.addEventListener('click', randomizeAgain);
   const ns = $('#noticeStart');
   if (ns) ns.addEventListener('click', startTournament);
+}
+
+// Organizer-only control to switch between 1 and 2 games at a time,
+// mid-tournament included. The server re-derives the court queue on the
+// next read, so the change takes effect immediately for everyone.
+function renderCourtControl() {
+  const state = app.state;
+  const el = $('#courtControl');
+  if (!el) return;
+  if (!app.isOrganizer || !state || state.championTeamId) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  const cur = state.gamesAtATime === 1 ? 1 : 2;
+  el.hidden = false;
+  el.innerHTML =
+    '<span class="court-control-label">Games at a time</span>' +
+    [1, 2]
+      .map(
+        (n) =>
+          '<button type="button" class="court-btn' + (n === cur ? ' selected' : '') + '" data-courts-set="' + n + '">' +
+          n + (n === 1 ? ' Court' : ' Courts') + '</button>'
+      )
+      .join('');
+  el.querySelectorAll('[data-courts-set]').forEach((btn) => {
+    btn.addEventListener('click', () => setGamesAtATime(Number(btn.dataset.courtsSet)));
+  });
+}
+
+async function setGamesAtATime(n) {
+  if (!app.isOrganizer || !app.tournamentId) return;
+  if ((app.state.gamesAtATime === 1 ? 1 : 2) === n) return;
+  try {
+    const res = await fetch('/api/redraw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-organizer-key': app.organizerKey },
+      body: JSON.stringify({ id: app.tournamentId, action: 'courts', gamesAtATime: n }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not change the court setting.');
+    app.state = data.tournament;
+    renderPlay();
+    toast(n === 1 ? 'One game at a time now' : 'Two games at a time now');
+  } catch (e) {
+    toast(e.message, 3400);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Live team editing (organizer only; the server enforces the key)
+// ---------------------------------------------------------------------------
+
+async function postEdit(body) {
+  const res = await fetch('/api/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-organizer-key': app.organizerKey },
+    body: JSON.stringify(Object.assign({ id: app.tournamentId }, body)),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Could not make that edit.');
+  app.state = data.tournament;
+  app.editSel = null;
+  app.editForm = null;
+  renderPlay();
+}
+
+function editFormHtml(team, player) {
+  const f = app.editForm;
+  const isSub = f.kind === 'sub';
+  let html =
+    '<div class="edit-form"><input id="editNameInput" class="text-input" type="text" maxlength="40" autocomplete="off" placeholder="' +
+    (isSub ? 'New player name' : 'Player name') + '" value="' + (isSub ? '' : esc(player)) + '">';
+  if (isSub && app.state.mode === 'coed') {
+    const g = f.gender || 'M';
+    html +=
+      '<span class="gender-toggle">' +
+      '<button type="button" class="gender-btn' + (g === 'M' ? ' on' : '') + '" data-edit-gender="M">M</button>' +
+      '<button type="button" class="gender-btn' + (g === 'F' ? ' on' : '') + '" data-edit-gender="F">F</button>' +
+      '</span>';
+  }
+  html +=
+    '<div class="edit-form-actions"><button type="button" class="primary-btn small" id="editSave">Save</button>' +
+    '<button type="button" class="ghost-btn" id="editCancel">Cancel</button></div></div>';
+  return html;
+}
+
+function renderEditPanel() {
+  const panel = $('#editPanel');
+  if (!panel) return;
+  const state = app.state;
+  if (!app.editOpen || !app.isOrganizer || !state || state.championTeamId) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const teams = state.teams.slice().sort((a, b) => (a.seed || 99) - (b.seed || 99));
+  if (state.byeTeam) teams.push(state.byeTeam);
+  let html = '<span class="field-label">Edit Teams</span>';
+  html += '<p class="mode-note">Games already played stand as played. Edits carry the new lineup forward from here. Changes show on the spectator link right away. In Male + Female mode the mix is your call — the teams below show exactly who is paired.</p>';
+  if (app.editSel) {
+    html +=
+      '<div class="edit-hint">Swapping <strong>' + esc(app.editSel.player) + '</strong>: tap a player on another team to swap them, or tap Swap on the same player to cancel.</div>';
+  }
+  html += teams
+    .map((t) => {
+      const label = t.byePending
+        ? 'First-round bye'
+        : t.walker && t.players.length === 1
+          ? 'The Walker (solo)'
+          : 'Team ' + (t.seed || '');
+      const rows = t.players
+        .map((p) => {
+          const sel = app.editSel && app.editSel.teamId === t.id && app.editSel.player === p;
+          let row =
+            '<div class="edit-player-row' + (sel ? ' selected' : '') + '"><span class="edit-player-name">' + esc(p) + '</span>' +
+            '<span class="edit-btns">' +
+            '<button type="button" class="edit-btn" data-act="swap" data-team="' + t.id + '" data-player="' + esc(p) + '">Swap</button>' +
+            '<button type="button" class="edit-btn" data-act="sub" data-team="' + t.id + '" data-player="' + esc(p) + '">Substitute</button>' +
+            '<button type="button" class="edit-btn" data-act="rename" data-team="' + t.id + '" data-player="' + esc(p) + '">Rename</button>' +
+            '</span></div>';
+          if (app.editForm && app.editForm.teamId === t.id && app.editForm.player === p) {
+            row += editFormHtml(t, p);
+          }
+          return row;
+        })
+        .join('');
+      return '<div class="edit-team"><div class="edit-team-label">' + esc(label) + ' — ' + esc(t.players.join(' & ')) + '</div>' + rows + '</div>';
+    })
+    .join('');
+  panel.innerHTML = html;
+  panel.querySelectorAll('[data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => onEditAction(btn));
+  });
+  panel.querySelectorAll('[data-edit-gender]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      app.editForm.gender = btn.dataset.editGender;
+      renderEditPanel();
+    });
+  });
+  const save = panel.querySelector('#editSave');
+  if (save) {
+    save.addEventListener('click', async () => {
+      const f = app.editForm;
+      const name = $('#editNameInput').value.trim();
+      try {
+        if (f.kind === 'sub') {
+          await postEdit({ action: 'substitute', teamId: f.teamId, outPlayer: f.player, inName: name, gender: app.state.mode === 'coed' ? f.gender : undefined });
+          toast(name + ' is in for ' + f.player);
+        } else {
+          await postEdit({ action: 'rename', from: f.player, to: name });
+          toast('Renamed to ' + name);
+        }
+      } catch (e) {
+        toast(e.message, 3600);
+      }
+    });
+  }
+  const cancel = panel.querySelector('#editCancel');
+  if (cancel) {
+    cancel.addEventListener('click', () => {
+      app.editForm = null;
+      renderEditPanel();
+    });
+  }
+}
+
+function onEditAction(btn) {
+  const team = btn.dataset.team;
+  const player = btn.dataset.player;
+  const act = btn.dataset.act;
+  if (act === 'swap') {
+    if (!app.editSel) {
+      app.editSel = { teamId: team, player };
+      app.editForm = null;
+      renderEditPanel();
+      return;
+    }
+    if (app.editSel.teamId === team && app.editSel.player === player) {
+      app.editSel = null;
+      renderEditPanel();
+      return;
+    }
+    if (app.editSel.teamId === team) {
+      app.editSel = { teamId: team, player };
+      renderEditPanel();
+      return;
+    }
+    const sel = app.editSel;
+    postEdit({ action: 'swap', teamAId: sel.teamId, playerA: sel.player, teamBId: team, playerB: player })
+      .then(() => toast(sel.player + ' and ' + player + ' swapped teams'))
+      .catch((e) => toast(e.message, 3600));
+    return;
+  }
+  app.editSel = null;
+  app.editForm = { kind: act, teamId: team, player, gender: 'M' };
+  renderEditPanel();
+  const input = $('#editNameInput');
+  if (input) {
+    input.focus();
+    if (act === 'rename') input.select();
+  }
 }
 
 function teamRecord(state, team) {
@@ -509,14 +782,16 @@ function matchCardHtml(state, match, num) {
   let cls = 'match';
   if (match.conditionalReset) cls += ' reset-match';
   if (match.status === 'bye') cls += ' bye-match';
+  if (match.court) cls += ' on-court';
   if (state.championTeamId) {
     const champ = state.championTeamId;
     if (match.status === 'complete' && match.winner === champ) cls += ' champ-path';
   }
   const foot = matchFootText(state, match);
+  const courtBadge = match.court ? '<span class="court-badge">Court ' + match.court + ' · On Court</span>' : '';
   return (
     '<div class="' + cls + '" data-match-card="' + match.id + '">' +
-    '<div class="match-meta"><span>' + esc(match.label) + '</span><span>' + (num ? 'Game ' + num : '') + '</span></div>' +
+    '<div class="match-meta"><span>' + esc(match.label) + '</span><span class="match-meta-right">' + courtBadge + (num ? '<span>Game ' + num + '</span>' : '') + '</span></div>' +
     teamRowHtml(state, match, 'A') +
     teamRowHtml(state, match, 'B') +
     (foot ? '<div class="match-foot">' + esc(foot) + '</div>' : '') +
@@ -542,12 +817,17 @@ function renderMatches() {
     if (m.status !== 'bye') numberOf.set(m.id, ++num);
   });
   const ready = sorted.filter((m) => m.status === 'ready');
-  const upNext = sorted.filter((m) => m.status === 'pending');
+  // The server derives the court queue on every read: the first
+  // gamesAtATime ready matches carry a court number, the rest wait.
+  let onCourt = ready.filter((m) => m.court);
+  if (!onCourt.length && ready.length) onCourt = ready; // defensive fallback
+  const waiting = ready.filter((m) => !onCourt.includes(m));
+  const upNext = waiting.concat(sorted.filter((m) => m.status === 'pending'));
   const done = sorted.filter((m) => m.status === 'complete' || m.status === 'bye');
   let html = '';
-  html += '<p class="section-label">Now Playing — tap the winning team</p>';
-  html += ready.length
-    ? '<div class="match-list">' + ready.map((m) => matchCardHtml(state, m, numberOf.get(m.id))).join('') + '</div>'
+  html += '<p class="section-label accent">On Court — Now Playing' + (app.isOrganizer ? ' · tap the winning team' : '') + '</p>';
+  html += onCourt.length
+    ? '<div class="match-list">' + onCourt.map((m) => matchCardHtml(state, m, numberOf.get(m.id))).join('') + '</div>'
     : '<p class="empty-note">' + (state.championTeamId ? 'The tournament is finished.' : 'No games are ready right now.') + '</p>';
   if (upNext.length) {
     html += '<p class="section-label">Up Next</p><div class="match-list">' + upNext.map((m) => matchCardHtml(state, m, numberOf.get(m.id))).join('') + '</div>';
@@ -830,8 +1110,75 @@ function showChampion() {
     story += ' · Undefeated all night';
   }
   $('#championSub').textContent = story + ' · ' + state.name;
+  $('#championDate').textContent = new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
   $('#championOverlay').hidden = false;
   runConfetti();
+}
+
+// ---------------------------------------------------------------------------
+// Past Champions (tournament history wall, on the home screen)
+// ---------------------------------------------------------------------------
+
+function historyDateText(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function historyMetaText(e) {
+  const fmt = e.format === 'double' ? 'Double Elimination' : 'Single Elimination';
+  const mode = e.mode === 'coed' ? 'Male + Female Draw' : 'Blind Draw';
+  return fmt + ' · ' + mode + ' · ' + e.teamCount + ' teams · ' + e.playerCount + ' players · ' + e.gamesPlayed + ' games';
+}
+
+function historyEntryHtml(e, featured) {
+  const names = esc(e.champion.players.join(' & ')) + (e.champion.walker ? ' — Walker (solo)' : '');
+  const runner = e.runnerUp
+    ? '<p class="history-runner">Runner-up: ' + esc(e.runnerUp.players.join(' & ')) + (e.runnerUp.walker ? ' — Walker (solo)' : '') + '</p>'
+    : '';
+  const link = e.id ? '<a class="history-link" href="/?t=' + encodeURIComponent(e.id) + '">View the final bracket</a>' : '';
+  if (featured) {
+    return (
+      '<div class="history-featured">' +
+      '<img class="history-crest" src="/logo.png" alt="Get Cornholed crest">' +
+      '<p class="micro-label accent">Latest Champions</p>' +
+      '<div class="history-names">' + names + '</div>' +
+      '<p class="history-tourney">' + esc(e.name) + ' · ' + historyDateText(e.completedAt) + '</p>' +
+      '<p class="history-meta">' + esc(historyMetaText(e)) + '</p>' + runner + link +
+      '</div>'
+    );
+  }
+  return (
+    '<div class="history-row">' +
+    '<p class="micro-label accent">Champions</p>' +
+    '<div class="history-names small">' + names + '</div>' +
+    '<p class="history-tourney">' + esc(e.name) + ' · ' + historyDateText(e.completedAt) + '</p>' +
+    '<p class="history-meta">' + esc(historyMetaText(e)) + '</p>' + runner + link +
+    '</div>'
+  );
+}
+
+async function loadHistory() {
+  const wrap = $('#pastChampions');
+  const list = $('#historyList');
+  if (!wrap || !list) return;
+  try {
+    const res = await fetch('/api/history');
+    if (!res.ok) return;
+    const data = await res.json();
+    const entries = Array.isArray(data.history) ? data.history : [];
+    wrap.hidden = false;
+    if (!entries.length) {
+      list.innerHTML = '<p class="empty-note">No champions yet. Your first tournament writes the first line of history.</p>';
+      return;
+    }
+    list.innerHTML = entries.map((e, i) => historyEntryHtml(e, i === 0)).join('');
+    if (location.hash === '#past-champions') {
+      wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  } catch (e) {
+    /* history is a showcase; fail quietly */
+  }
 }
 
 function runConfetti() {
@@ -909,6 +1256,13 @@ function initSetup() {
     });
   });
   $('#resetToggle').addEventListener('change', renderCounter);
+  $('#courtsRow').querySelectorAll('.choice-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      app.courts = Number(card.dataset.courts) === 1 ? 1 : 2;
+      $('#courtsRow').querySelectorAll('.choice-card').forEach((c) => c.classList.toggle('selected', c === card));
+      renderCounter();
+    });
+  });
   $('#namesInput').addEventListener('input', syncPlayersFromSetup);
   $('#drawButton').addEventListener('click', startDraw);
   renderCounter();
@@ -970,10 +1324,25 @@ function initPlay() {
   $('#undoButton').addEventListener('click', undoLast);
   $('#undoToastButton').addEventListener('click', undoLast);
   $('#newTournament').addEventListener('click', () => location.assign('/'));
+  $('#drawBack').addEventListener('click', backToSetup);
+  $('#editPlayers').addEventListener('click', () => {
+    backToSetup();
+    toast('Edit the roster, then Draw Teams — a roster change redraws the teams from scratch', 3600);
+  });
+  $('#playBack').addEventListener('click', backToDraw);
+  $('#editTeamsButton').addEventListener('click', () => {
+    app.editOpen = !app.editOpen;
+    if (!app.editOpen) {
+      app.editSel = null;
+      app.editForm = null;
+    }
+    renderPlay();
+  });
   $('#toBracket').addEventListener('click', startTournament);
   $('#randomizeAgain').addEventListener('click', randomizeAgain);
   $('#previewBracket').addEventListener('click', previewBracket);
   $('#championClose').addEventListener('click', () => ($('#championOverlay').hidden = true));
+  $('#championHistory').addEventListener('click', () => location.assign('/#past-champions'));
   $('#championShare').addEventListener('click', async () => {
     const champ = teamById(app.state, app.state.championTeamId);
     const text = 'Get Cornholed — ' + app.state.name + ' champions: ' + (champ ? teamDisplayName(champ) : '') + ' ' + spectatorLink();
@@ -998,6 +1367,7 @@ function initPlay() {
     $('#view-play').hidden = true;
     $('#view-draw').hidden = true;
     $('#view-setup').hidden = false;
+    loadHistory();
     $('#namesInput').value = names;
     if (app.state.mode === 'coed') {
       $('#modeRow').querySelector('[data-mode="coed"]').click();
@@ -1046,5 +1416,6 @@ function renderQr() {
   const loaded = await loadTournamentFromUrl();
   if (!loaded) {
     $('#view-setup').hidden = false;
+    loadHistory();
   }
 })();
